@@ -14,7 +14,7 @@ from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support.ui import WebDriverWait
 
-from unsubscribe.browser_helpers import chrome_driver_attach
+from unsubscribe.browser_helpers import chrome_driver_attach, ensure_brave_running
 from unsubscribe.live_brave_trace import (
     cleanup_unsubscribe_trace_png_files,
     live_brave_trace_dir,
@@ -492,10 +492,8 @@ def batch_browser_unsubscribe(
     if progress is None:
         progress = TimedRun(2 + 2 * len(urls), enabled=not quiet)
 
-    progress.step(
-        f"Attaching WebDriver to Brave at {debugger_address} (already running with "
-        "--remote-debugging-port)..."
-    )
+    progress.step(f"Ensuring Brave is running with remote debugging on {debugger_address}...")
+    ensure_brave_running(debugger_address)
     driver: WebDriver | None = None
     results: list[dict[str, Any]] = []
     capture_session: PageCaptureSession | None = PageCaptureSession.create(jobs)

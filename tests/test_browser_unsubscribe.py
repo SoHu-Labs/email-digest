@@ -62,6 +62,9 @@ def test_batch_attach_once_get_each_url_quit_once() -> None:
 
     with (
         patch(
+            "unsubscribe.browser_unsubscribe.ensure_brave_running",
+        ),
+        patch(
             "unsubscribe.browser_unsubscribe.chrome_driver_attach",
             return_value=mock_driver,
         ) as mock_attach,
@@ -108,6 +111,9 @@ def test_batch_failure_on_one_url_continues_and_quits_once() -> None:
     ]
 
     with (
+        patch(
+            "unsubscribe.browser_unsubscribe.ensure_brave_running",
+        ),
         patch(
             "unsubscribe.browser_unsubscribe.chrome_driver_attach",
             return_value=mock_driver,
@@ -347,6 +353,9 @@ def test_batch_uses_job_mailbox_hint_when_env_absent() -> None:
     jobs = [(1, "S", "snd", "https://wizz.example/u", "hint@mailbox.test")]
     with (
         patch(
+            "unsubscribe.browser_unsubscribe.ensure_brave_running",
+        ),
+        patch(
             "unsubscribe.browser_unsubscribe.chrome_driver_attach",
             return_value=mock_driver,
         ),
@@ -372,6 +381,9 @@ def test_batch_prefers_env_subscriber_over_job_mailbox_hint() -> None:
     mock_driver.window_handles = ["main"]
     jobs = [(1, "S", "snd", "https://wizz.example/u", "hint@mailbox.test")]
     with (
+        patch(
+            "unsubscribe.browser_unsubscribe.ensure_brave_running",
+        ),
         patch(
             "unsubscribe.browser_unsubscribe.chrome_driver_attach",
             return_value=mock_driver,
@@ -399,6 +411,9 @@ def test_batch_forwards_subscriber_email_to_page_handler() -> None:
     mock_driver.window_handles = ["main"]
     jobs = [_job(1, "https://pref.example/unsub")]
     with (
+        patch(
+            "unsubscribe.browser_unsubscribe.ensure_brave_running",
+        ),
         patch(
             "unsubscribe.browser_unsubscribe.chrome_driver_attach",
             return_value=mock_driver,
