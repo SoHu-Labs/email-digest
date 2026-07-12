@@ -51,7 +51,7 @@ def test_complete_uses_opencode_when_env_empty(
         captured.update(kwargs)
         return _Resp()
 
-    monkeypatch.setattr("agentkit.llm._litellm.litellm.completion", fake_completion)
+    monkeypatch.setattr("agentkit.llm._litellm._post_completion", fake_completion)
 
     out = complete([{"role": "user", "content": "hi"}], alias="fast")
     assert out == "ok"
