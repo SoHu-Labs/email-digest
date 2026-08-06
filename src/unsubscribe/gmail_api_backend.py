@@ -224,6 +224,7 @@ class GmailApiBackend:
                     from google.auth.transport.requests import Request
 
                     creds.refresh(Request())
+                    p.write_text(creds.to_json())
                 except Exception as e:
                     raise ValueError(
                         f"Could not refresh OAuth token ({p}): {e}"
@@ -245,6 +246,35 @@ class GmailApiBackend:
                 f"(must include {_SCOPE_GMAIL_READONLY})."
             )
         return cls.from_token_path(Path(raw))
+
+    @staticmethod
+    def regenerate_token(
+        token_path: Path,
+        *,
+        client_secret_path: Path | None = None,
+        scopes: tuple[str, ...] = _SCOPES,
+        port: int = 0,
+        browser: str | None = None,
+    ) -> None:
+        """Run OAuth installed-app flow and write a new token JSON file.
+
+        Opens a browser for Google OAuth consent. The resulting token is written
+        to *token_path*.
+
+        Call after a refresh_token has been revoked (e.g. app in testing mode,
+        too many outstanding tokens, or user revoked access).
+        """
+        from google_auth_oauthlib.flow import InstalledAppFlow
+
+        p = token_path.expanduser()
+        cs = (client_secret_path or Path.home() / ".google" / "client_secret.json").expanduser()
+        if not cs.is_file():
+            raise ValueError(f"Client secret file not found: {cs}")
+
+        flow = InstalledAppFlow.from_client_secrets_file(str(cs), list(scopes))
+        creds = flow.run_local_server(port=port, browser=browser)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(creds.to_json())
 
     def _service(self):
         return build("gmail", "v1", credentials=self._credentials, cache_discovery=False)

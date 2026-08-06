@@ -14,6 +14,7 @@ Available topics: `ai`, `health` (defined in `topics/*.yaml` with sender lists, 
 | Full run (extract + HTML) | `/digest run <topic>` |
 | Cost report | `/digest cost --json` |
 | Validate topics | `/digest topics --strict` |
+| Regenerate OAuth token | `/unsubscribe reauth` |
 
 ## Browser environment
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from collections.abc import Callable
@@ -524,6 +525,10 @@ def run_check(
         return 130
 
 
+def _default_token_path() -> Path:
+    return Path(os.environ.get("GOOGLE_OAUTH_TOKEN", "~/.google/oauth_token.json")).expanduser()
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -542,6 +547,25 @@ def main(argv: list[str] | None = None) -> int:
         default=3,
         help="Gmail newer_than:Nd (default: 3).",
     )
+    reauth_p = sub.add_parser("reauth", help="Regenerate expired OAuth token via browser flow.")
+    reauth_p.add_argument(
+        "--token-path",
+        type=Path,
+        default=_default_token_path(),
+        help="Output path for the new token JSON.",
+    )
+    reauth_p.add_argument(
+        "--client-secret-path",
+        type=Path,
+        default=None,
+        help="Path to client_secret.json (default: ~/.google/client_secret.json).",
+    )
+    reauth_p.add_argument(
+        "--browser",
+        type=str,
+        default=None,
+        help="Browser to open for OAuth consent (e.g. 'brave', 'chrome').",
+    )
 
     args = parser.parse_args(argv)
     try:
@@ -549,6 +573,14 @@ def main(argv: list[str] | None = None) -> int:
             backend = GmailApiBackend.from_env()
             facade = GmailFacade(backend)
             return run_check(args.days, facade=facade)
+        if args.command == "reauth":
+            GmailApiBackend.regenerate_token(
+                args.token_path,
+                client_secret_path=args.client_secret_path,
+                browser=args.browser,
+            )
+            print(f"Token written to {args.token_path}")
+            return 0
         return 1
     except KeyboardInterrupt:
         return 130
