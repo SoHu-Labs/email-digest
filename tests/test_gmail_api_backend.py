@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from googleapiclient.errors import HttpError
 
 from unsubscribe.gmail_api_backend import (
     GmailApiBackend,
@@ -78,9 +79,8 @@ def test_recipient_mailbox_for_browser_forms_prefers_delivered_to() -> None:
 
 
 @patch("unsubscribe.gmail_api_backend.build")
-def test_list_messages_calls_metadata_then_minimal_per_message(mock_build: MagicMock) -> None:
+def test_list_messages_fetches_metadata_once_per_message(mock_build: MagicMock) -> None:
     meta = json.loads((_FIXTURES / "metadata_message.json").read_text(encoding="utf-8"))
-    minimal = json.loads((_FIXTURES / "minimal_message.json").read_text(encoding="utf-8"))
 
     mock_service = MagicMock()
     mock_build.return_value = mock_service
@@ -89,7 +89,7 @@ def test_list_messages_calls_metadata_then_minimal_per_message(mock_build: Magic
     }
     get_mock = mock_service.users.return_value.messages.return_value.get
     get_exec = get_mock.return_value.execute
-    get_exec.side_effect = [meta, minimal]
+    get_exec.side_effect = [meta]
 
     backend = GmailApiBackend(credentials=MagicMock())
     out = backend.list_messages("newer_than:3d", max_results=5)
@@ -111,9 +111,8 @@ def test_list_messages_calls_metadata_then_minimal_per_message(mock_build: Magic
 
     list_call = mock_service.users.return_value.messages.return_value.list
     list_call.assert_called_once_with(userId="me", q="newer_than:3d", maxResults=5)
-    assert get_mock.call_count == 2
+    assert get_mock.call_count == 1
     first = get_mock.call_args_list[0]
-    second = get_mock.call_args_list[1]
     assert first.kwargs == {
         "userId": "me",
         "id": "msg123",
@@ -129,14 +128,12 @@ def test_list_messages_calls_metadata_then_minimal_per_message(mock_build: Magic
             "To",
         ],
     }
-    assert second.kwargs == {"userId": "me", "id": "msg123", "format": "minimal"}
 
 
 @patch("unsubscribe.gmail_api_backend.build")
 def test_list_messages_multiple_ids_respects_workers_one(mock_build: MagicMock) -> None:
-    """Sequential path issues two ``get`` calls per list id (for mock ordering in tests)."""
+    """Sequential path issues one metadata ``get`` per list id (for mock ordering in tests)."""
     meta = json.loads((_FIXTURES / "metadata_message.json").read_text(encoding="utf-8"))
-    minimal = json.loads((_FIXTURES / "minimal_message.json").read_text(encoding="utf-8"))
 
     mock_service = MagicMock()
     mock_build.return_value = mock_service
@@ -148,7 +145,7 @@ def test_list_messages_multiple_ids_respects_workers_one(mock_build: MagicMock) 
     }
     get_mock = mock_service.users.return_value.messages.return_value.get
     get_exec = get_mock.return_value.execute
-    get_exec.side_effect = [meta, minimal, meta, minimal]
+    get_exec.side_effect = [meta, meta]
 
     backend = GmailApiBackend(
         credentials=MagicMock(),
@@ -157,9 +154,54 @@ def test_list_messages_multiple_ids_respects_workers_one(mock_build: MagicMock) 
     out = backend.list_messages("newer_than:3d", max_results=5)
 
     assert len(out) == 2
-    assert get_mock.call_count == 4
-    assert {get_mock.call_args_list[i].kwargs["id"] for i in (0, 1)} == {"m1"}
-    assert {get_mock.call_args_list[i].kwargs["id"] for i in (2, 3)} == {"m2"}
+    assert get_mock.call_count == 2
+    assert {get_mock.call_args_list[i].kwargs["id"] for i in (0, 1)} == {"m1", "m2"}
+
+
+def _http_error(status: int, reason: str) -> HttpError:
+    content = json.dumps({"error": {"errors": [{"reason": reason}]}}).encode()
+    resp = type("_Resp", (), {"status": status, "reason": reason})()
+    return HttpError(resp, content)
+
+
+def test_request_gate_allows_burst_then_paces() -> None:
+    from unsubscribe.gmail_api_backend import _RequestGate
+
+    clock_t = [0.0]
+    slept: list[float] = []
+    gate = _RequestGate(
+        rate_per_s=4.0,
+        burst=3,
+        clock=lambda: clock_t[0],
+        sleep=slept.append,
+    )
+    gate.wait()
+    gate.wait()
+    gate.wait()
+    assert slept == []
+    gate.wait()
+    assert slept == [pytest.approx(0.25)]
+
+
+def test_execute_with_retry_retries_rate_limit_then_succeeds() -> None:
+    from unsubscribe.gmail_api_backend import _execute_with_retry
+
+    request = MagicMock()
+    request.execute.side_effect = [_http_error(403, "rateLimitExceeded"), {"ok": True}]
+    with patch("unsubscribe.gmail_api_backend.time.sleep") as mock_sleep:
+        assert _execute_with_retry(request, gate=MagicMock()) == {"ok": True}
+    assert request.execute.call_count == 2
+    mock_sleep.assert_called_once()
+
+
+def test_execute_with_retry_does_not_retry_other_http_errors() -> None:
+    from unsubscribe.gmail_api_backend import _execute_with_retry
+
+    request = MagicMock()
+    request.execute.side_effect = _http_error(404, "notFound")
+    with pytest.raises(HttpError):
+        _execute_with_retry(request, gate=MagicMock())
+    assert request.execute.call_count == 1
 
 
 @patch("unsubscribe.gmail_api_backend.build")

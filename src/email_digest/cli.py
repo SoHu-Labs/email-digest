@@ -708,7 +708,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "Usage: python -m email_digest [--version|-V] digest "
             "<cost|keep|sources|spark-check|topics|run|version> | "
-            "python -m email_digest unsubscribe [check …]",
+            "python -m email_digest unsubscribe [--days N | reauth]",
             file=sys.stderr,
         )
         return 2
@@ -716,7 +716,7 @@ def main(argv: list[str] | None = None) -> int:
         from unsubscribe.cli import main as umain
 
         rest = argv[1:]
-        return umain(rest if rest else ["check"])
+        return umain(rest)
     if argv[0] == "digest":
         return _main_digest(argv[1:])
     print(f"Unknown command {argv[0]!r}.", file=sys.stderr)

@@ -21,7 +21,7 @@ Entry points: `python -m email_digest` (`__main__` → `cli.main`), console scri
 | File | Purpose |
 |---|---|
 | `cli.py` | `digest` subcommands: `version`, `cost`, `topics`, `candidates` / `candidates --all`, `keep` (`add`/`remove`/`merge`), **`walkthrough`**, **`spark-check`**, `run` (`--all`, …); passes through `unsubscribe` argv |
-| `walkthrough.py` | `run_digest_walkthrough` — topic Gmail list filtered to **`digest_source_candidate`**; terminal prompts; **`add_to_keep_list`** on **[Enter]**; **`--body`** flag enables parallel plain-text body prefetch + preview (ThreadPoolExecutor, same pattern as `unsubscribe check`); **`--all`** in CLI walks every topic in sorted filename order |
+| `walkthrough.py` | `run_digest_walkthrough` — topic Gmail list filtered to **`digest_source_candidate`**; terminal prompts; **`add_to_keep_list`** on **[Enter]**; **`--body`** flag enables parallel plain-text body prefetch + preview (ThreadPoolExecutor, same pattern as `unsubscribe`); **`--all`** in CLI walks every topic in sorted filename order |
 | `pipeline.py` | Orchestrates query → list → keep-list filter → extract (LLM) or empty extraction when not **`digest_source_candidate`** → cache → trending → optional synthesis + HTML + `maybe_email_digest`; each **`messages[]`** item includes **`digest_source_candidate`** |
 | `gmail_query.py` | Builds Gmail `q` strings from topic YAML (`window_days`, senders, folders, `since`) |
 | `config.py` | `TopicConfig` + `load_topic_config` from `topics/<stem>.yaml` |

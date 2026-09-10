@@ -1,4 +1,4 @@
-"""CLI ``unsubscribe check`` (Iteration 4) with fake backend and scripted input."""
+"""CLI ``unsubscribe`` (Iteration 4) with fake backend and scripted input."""
 
 from __future__ import annotations
 
@@ -38,10 +38,12 @@ class _FakeBackend:
     def __init__(self, messages: list[GmailHeaderSummary]) -> None:
         self.messages = messages
         self.last_query: str | None = None
+        self.last_max_results: int | None = None
         self.bodies: dict[str, str] = {}
 
     def list_messages(self, query: str, *, max_results: int = 50):
         self.last_query = query
+        self.last_max_results = max_results
         return self.messages[:max_results]
 
     def get_message_html(self, message_id: str) -> str:
@@ -76,6 +78,50 @@ def test_run_check_query_days_and_chats(tmp_path: Path) -> None:
     assert fb.last_query is not None
     assert "newer_than:7d" in fb.last_query
     assert "-in:chats" in fb.last_query
+
+
+def test_run_check_scans_full_window_not_fifty(tmp_path: Path) -> None:
+    k = tmp_path / ".unsubscribe_keep.json"
+    fb = _FakeBackend([])
+    facade = GmailFacade(fb)
+
+    def _inp(_p: str = "") -> str:
+        return ""
+
+    run_check(28, facade=facade, keep_list_path=k, unsubscribed_list_path=tmp_path / ".unsubscribed.json", input_fn=_inp, skip_automation=True)
+    assert fb.last_max_results == 500
+
+
+def test_run_check_renders_boxed_sections(capsys, tmp_path: Path) -> None:
+    k = tmp_path / ".unsubscribe_keep.json"
+    k.write_text(
+        json.dumps({"kept@old.com": {"subject": "Old", "date_kept": "2024-01-01"}}),
+        encoding="utf-8",
+    )
+    unsub = tmp_path / ".unsubscribed.json"
+    unsub.write_text(
+        json.dumps({"gone@old.com": {"subject": "Gone", "date_unsubscribed": "2024-01-02"}}),
+        encoding="utf-8",
+    )
+    messages = [
+        _msg("m1", from_="N <new@list.com>", subject="Alpha", date="Wed, 10 Jan 2024 12:00:00 +0000"),
+    ]
+    fb = _FakeBackend(messages)
+    facade = GmailFacade(fb)
+    inputs = iter(["u", ""])
+
+    def _inp(_p: str = "") -> str:
+        return next(inputs)
+
+    run_check(3, facade=facade, keep_list_path=k, unsubscribed_list_path=unsub, input_fn=_inp, skip_automation=True)
+    out = capsys.readouterr().out
+    assert "┌" in out
+    assert "└" in out
+    assert "│ Previously kept (will not be asked):" in out
+    assert "│ Previously unsubscribed (will not be asked):" in out
+    assert "│ New newsletters (last 3 days):" in out
+    assert "┌─ #1 " in out
+    assert "│ [Enter] keep   [u] unsubscribe   [q] quit walkthrough" in out
 
 
 def test_run_check_filters_kept_and_shows_summary(capsys, tmp_path: Path) -> None:
@@ -200,9 +246,48 @@ def test_main_empty_argv_defaults_to_check(
     assert seen.get("days") == 3
 
 
-def test_main_check_help() -> None:
+def test_main_flag_first_runs_check_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    def _fake_run_check(days: int, **kwargs: object) -> int:
+        seen["days"] = days
+        return 0
+
+    monkeypatch.setattr("unsubscribe.cli.run_check", _fake_run_check)
+    monkeypatch.setattr(
+        "unsubscribe.cli.GmailApiBackend",
+        MagicMock(from_env=MagicMock(return_value=MagicMock())),
+    )
+    monkeypatch.setattr("unsubscribe.cli.GmailFacade", MagicMock())
+
+    assert main(["--days", "28"]) == 0
+    assert seen.get("days") == 28
+
+
+def test_main_check_is_not_a_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("unsubscribe.cli.run_check", MagicMock(return_value=0))
+    monkeypatch.setattr(
+        "unsubscribe.cli.GmailApiBackend",
+        MagicMock(from_env=MagicMock(return_value=MagicMock())),
+    )
+    monkeypatch.setattr("unsubscribe.cli.GmailFacade", MagicMock())
+
     with pytest.raises(SystemExit) as ei:
-        main(["check", "--help"])
+        main(["check"])
+    assert ei.value.code == 2
+
+
+def test_main_help() -> None:
+    with pytest.raises(SystemExit) as ei:
+        main(["--help"])
+    assert ei.value.code == 0
+
+
+def test_main_reauth_help() -> None:
+    with pytest.raises(SystemExit) as ei:
+        main(["reauth", "--help"])
     assert ei.value.code == 0
 
 
@@ -238,6 +323,28 @@ def test_run_check_automation_enter_calls_run_automated(
     assert "── Results ──" in out
     assert "one-click POST" in out or "server accepted" in out
     assert "may require further steps" in out
+
+
+def test_run_check_confirm_prompt_renders_boxed_form(
+    capsys, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GOOGLEADS_BROWSER_DEBUGGER_ADDRESS", "127.0.0.1:9222")
+    k = tmp_path / ".unsubscribe_keep.json"
+    messages = [
+        _msg("m1", from_="X <x@x.com>", subject="S", date="Wed, 10 Jan 2024 12:00:00 +0000"),
+    ]
+    fb = _FakeBackend(messages)
+    facade = GmailFacade(fb)
+    inputs = iter(["u", ""])
+
+    def _inp(_p: str = "") -> str:
+        return next(inputs)
+
+    with patch("unsubscribe.cli.run_automated_unsubscribe", return_value=[]):
+        run_check(3, facade=facade, keep_list_path=k, unsubscribed_list_path=tmp_path / ".unsubscribed.json", input_fn=_inp, skip_automation=False)
+    out = capsys.readouterr().out
+    assert "┌─ Unsubscribe all 1 selected " in out
+    assert "│ [Enter] confirm   [q] quit" in out
 
 
 def test_run_check_automation_q_skips(capsys, tmp_path: Path) -> None:

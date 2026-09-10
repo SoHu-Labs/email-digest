@@ -31,7 +31,8 @@ pip install -e ".[dev]"
 
 ```
 # Unsubscribe
-python -m email_digest unsubscribe check [-d DAYS]
+python -m email_digest unsubscribe [--days DAYS]
+python -m email_digest unsubscribe reauth
 
 # Digest
 python -m email_digest digest topics [--json]
@@ -53,6 +54,13 @@ prefetches plain-text bodies for a preview. At the end, selected unsubscribe
 items are sent through automated one-click + browser unsubscribe.
 
 **`digest cost`** reports LLM API usage from the SQLite cache.
+
+**`unsubscribe`** scans the last `--days` days
+of Gmail (default 3, up to the 500 newest messages), shortlists newsletters with
+unsubscribe links, and walks through them interactively. Fetches are paced to stay
+within Gmail's per-user quota, so a 4-week scan takes a couple of minutes.
+**[Enter]** keeps a sender, **[u]** marks it for unsubscribe, **[q]** stops the
+walkthrough. `unsubscribe reauth` regenerates the OAuth token via the browser.
 
 ## Docs
 

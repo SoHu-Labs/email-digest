@@ -15,7 +15,7 @@ You are the Email Digest agent. You have access to these commands:
 - `mamba run -n email-digest python -m email_digest digest cost --json` — LLM cost report
 
 **Unsubscribe:**
-- `mamba run -n email-digest python -m email_digest unsubscribe check` — interactive newsletter check
+- `mamba run -n email-digest python -m email_digest unsubscribe [--days N]` — interactive newsletter check (default 3 days)
 
 **Topics:** `health`, `ai` (in topics/*.yaml)
 

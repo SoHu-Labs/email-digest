@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import threading
+import time
+from collections.abc import Callable
 from email.utils import getaddresses
 from concurrent.futures import ThreadPoolExecutor
 from html import unescape
 from pathlib import Path
+from typing import Any
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -61,6 +65,75 @@ _MAX_BODY_TEXT_CHARS = 500
 _tls_gmail = threading.local()
 _LIST_MESSAGES_MAX_WORKERS_CAP = 16
 
+# Gmail quota (May 2026): 6,000 units/min per user; ``messages.get`` = 20, ``list`` = 5.
+_REQUEST_RATE_PER_S = 4.0
+_REQUEST_BURST = 50
+_RETRY_ATTEMPTS = 4
+_RETRY_BASE_S = 2.0
+_RATE_LIMIT_REASONS = frozenset(
+    {"rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded"}
+)
+
+
+class _RequestGate:
+    """Thread-safe token bucket pacing Gmail calls under the per-user quota."""
+
+    def __init__(
+        self,
+        *,
+        rate_per_s: float,
+        burst: int,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._rate = rate_per_s
+        self._burst = float(burst)
+        self._allowance = float(burst)
+        self._clock = clock
+        self._sleep = sleep
+        self._last = clock()
+        self._lock = threading.Lock()
+
+    def wait(self) -> None:
+        with self._lock:
+            now = self._clock()
+            elapsed = max(0.0, now - self._last)
+            self._allowance = min(self._burst, self._allowance + elapsed * self._rate)
+            self._last = now
+            if self._allowance >= 1.0:
+                self._allowance -= 1.0
+                return
+            wait_s = (1.0 - self._allowance) / self._rate
+            self._allowance = 0.0
+            self._last = now + wait_s
+            self._sleep(wait_s)
+
+
+def _is_rate_limit_error(err: HttpError) -> bool:
+    status = getattr(getattr(err, "resp", None), "status", None)
+    if status not in (403, 429):
+        return False
+    if status == 429:
+        return True
+    try:
+        payload = json.loads(err.content.decode("utf-8", errors="replace"))
+    except (AttributeError, ValueError):
+        return False
+    errors = (payload.get("error") or {}).get("errors") or []
+    return any(e.get("reason") in _RATE_LIMIT_REASONS for e in errors)
+
+
+def _execute_with_retry(request: Any, *, gate: _RequestGate) -> Any:
+    for attempt in range(_RETRY_ATTEMPTS):
+        gate.wait()
+        try:
+            return request.execute()
+        except HttpError as err:
+            if attempt == _RETRY_ATTEMPTS - 1 or not _is_rate_limit_error(err):
+                raise
+            time.sleep(_RETRY_BASE_S * (2**attempt))
+    raise AssertionError("unreachable")
+
 
 def _thread_local_gmail_service(credentials: Credentials) -> object:
     key = id(credentials)
@@ -75,33 +148,33 @@ def _thread_local_gmail_service(credentials: Credentials) -> object:
     return _tls_gmail.service
 
 
-def _header_summary_from_get_api(get_api, list_item: dict) -> GmailHeaderSummary:
-    """Build :class:`GmailHeaderSummary` using two ``messages().get`` calls (metadata + minimal)."""
+def _header_summary_from_get_api(
+    get_api: Any, list_item: dict, *, gate: _RequestGate
+) -> GmailHeaderSummary:
+    """Build :class:`GmailHeaderSummary` from one ``messages().get`` (metadata) call."""
     mid = list_item["id"]
     tid_hint = list_item.get("threadId", "")
-    meta = get_api(
-        userId="me",
-        id=mid,
-        format="metadata",
-        metadataHeaders=list(_METADATA_HEADERS),
-    ).execute()
+    meta = _execute_with_retry(
+        get_api(
+            userId="me",
+            id=mid,
+            format="metadata",
+            metadataHeaders=list(_METADATA_HEADERS),
+        ),
+        gate=gate,
+    )
     headers = {
         h["name"]: h["value"]
         for h in (meta.get("payload", {}).get("headers") or [])
     }
     hl = {k.strip().lower(): (v or "").strip() for k, v in headers.items()}
-    minimal = get_api(
-        userId="me",
-        id=mid,
-        format="minimal",
-    ).execute()
     return GmailHeaderSummary(
         id=mid,
         thread_id=meta.get("threadId", tid_hint),
         from_=hl.get("from", headers.get("From", "")),
         subject=hl.get("subject", headers.get("Subject", "")),
         date=hl.get("date", headers.get("Date", "")),
-        snippet=minimal.get("snippet", ""),
+        snippet=meta.get("snippet", ""),
         list_unsubscribe=hl.get("list-unsubscribe") or None,
         list_unsubscribe_post=hl.get("list-unsubscribe-post") or None,
         delivered_to=_recipient_mailbox_for_browser_forms(headers),
@@ -110,11 +183,14 @@ def _header_summary_from_get_api(get_api, list_item: dict) -> GmailHeaderSummary
 
 
 def _header_summary_from_list_item_threaded(
-    credentials: Credentials, list_item: dict
+    credentials: Credentials,
+    list_item: dict,
+    *,
+    gate: _RequestGate,
 ) -> GmailHeaderSummary:
     service = _thread_local_gmail_service(credentials)
     get_api = service.users().messages().get
-    return _header_summary_from_get_api(get_api, list_item)
+    return _header_summary_from_get_api(get_api, list_item, gate=gate)
 
 
 def _urlsafe_b64decode(data: str) -> bytes:
@@ -170,15 +246,18 @@ def plaintext_from_gmail_message_payload(payload: dict) -> str | None:
 
 
 def _get_message_html_threaded(
-    credentials: Credentials, message_id: str
+    credentials: Credentials,
+    message_id: str,
+    *,
+    gate: _RequestGate,
 ) -> tuple[str, str]:
     """Fetch one message's HTML body (thread-local service).  Returns (message_id, html)."""
     service = _thread_local_gmail_service(credentials)
-    full = (
+    full = _execute_with_retry(
         service.users()
         .messages()
-        .get(userId="me", id=message_id, format="full")
-        .execute()
+        .get(userId="me", id=message_id, format="full"),
+        gate=gate,
     )
     payload = full.get("payload") or {}
     html = html_from_gmail_message_payload(payload)
@@ -211,6 +290,7 @@ class GmailApiBackend:
         self._credentials = credentials
         # None => min(inbox size, cap). Use ``1`` in tests with shared mocks. Real runs fan out.
         self._list_messages_max_workers = list_messages_max_workers
+        self._gate = _RequestGate(rate_per_s=_REQUEST_RATE_PER_S, burst=_REQUEST_BURST)
 
     @classmethod
     def from_token_path(cls, path: Path) -> GmailApiBackend:
@@ -284,11 +364,11 @@ class GmailApiBackend:
             raise ValueError("max_results must be at least 1")
         try:
             service = self._service()
-            list_resp = (
+            list_resp = _execute_with_retry(
                 service.users()
                 .messages()
-                .list(userId="me", q=query, maxResults=max_results)
-                .execute()
+                .list(userId="me", q=query, maxResults=max_results),
+                gate=self._gate,
             )
             raw_msgs = list_resp.get("messages") or []
             if not raw_msgs:
@@ -304,13 +384,16 @@ class GmailApiBackend:
             # One worker: same-thread ``get`` calls (mock-friendly, low overhead for tiny scans).
             if max_workers == 1:
                 get_api = service.users().messages().get
-                return [_header_summary_from_get_api(get_api, m) for m in raw_msgs]
+                return [
+                    _header_summary_from_get_api(get_api, m, gate=self._gate)
+                    for m in raw_msgs
+                ]
 
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 return list(
                     pool.map(
                         lambda item: _header_summary_from_list_item_threaded(
-                            self._credentials, item
+                            self._credentials, item, gate=self._gate
                         ),
                         raw_msgs,
                     )
@@ -322,11 +405,11 @@ class GmailApiBackend:
         """Fetch ``format=full`` and return the first ``text/html`` body."""
         try:
             service = self._service()
-            full = (
+            full = _execute_with_retry(
                 service.users()
                 .messages()
-                .get(userId="me", id=message_id, format="full")
-                .execute()
+                .get(userId="me", id=message_id, format="full"),
+                gate=self._gate,
             )
             payload = full.get("payload") or {}
             html = html_from_gmail_message_payload(payload)
@@ -342,11 +425,11 @@ class GmailApiBackend:
         """Plain text for previews: HTML stripped when present, else first ``text/plain``."""
         try:
             service = self._service()
-            full = (
+            full = _execute_with_retry(
                 service.users()
                 .messages()
-                .get(userId="me", id=message_id, format="full")
-                .execute()
+                .get(userId="me", id=message_id, format="full"),
+                gate=self._gate,
             )
             payload = full.get("payload") or {}
             html = html_from_gmail_message_payload(payload)
@@ -388,7 +471,7 @@ class GmailApiBackend:
             pairs = list(
                 pool.map(
                     lambda mid: _get_message_html_threaded(
-                        self._credentials, mid
+                        self._credentials, mid, gate=self._gate
                     ),
                     message_ids,
                 )

@@ -1,4 +1,4 @@
-"""CLI: ``unsubscribe check`` — shortlist, interactive review, keep-list (Iteration 4)."""
+"""CLI: ``unsubscribe`` — shortlist, interactive review, keep-list (Iteration 4)."""
 
 from __future__ import annotations
 
@@ -38,6 +38,7 @@ _PREVIEW_MAX_LINES = 5
 
 _MIN_LIST_SUMMARY_LEN = 20
 _MAX_LIST_SUMMARY_CHARS = 140
+_MAX_SCAN_MESSAGES = 500
 
 # Opening lines Gmail often puts in snippet / HTML-to-text preamble (not the article).
 _BOILERPLATE_SUBSTRINGS: tuple[str, ...] = (
@@ -233,8 +234,28 @@ def _body_preview_lines(
     return "\n".join(lines[:max_lines])
 
 
+_BOX_INDENT = "  "
+_BOX_MIN_INNER = 48
+
+
+def _print_box(title: str) -> None:
+    inner = max(_BOX_MIN_INNER, len(title) + 2)
+    print(f"{_BOX_INDENT}┌{'─' * (inner + 2)}┐")
+    print(f"{_BOX_INDENT}│ {title.ljust(inner)} │")
+    print(f"{_BOX_INDENT}└{'─' * (inner + 2)}┘")
+
+
+def _print_form(title: str, rows: list[str]) -> None:
+    inner = max([_BOX_MIN_INNER, len(title) + 1, *(len(row) for row in rows)])
+    print(f"{_BOX_INDENT}┌─ {title} {'─' * (inner - len(title) - 1)}┐")
+    for row in rows:
+        print(f"{_BOX_INDENT}│ {row.ljust(inner)} │")
+    print(f"{_BOX_INDENT}└{'─' * (inner + 2)}┘")
+
+
 def _prompt_loop(
-    prompt: str,
+    title: str,
+    rows: list[str],
     *,
     input_fn: Callable[[str], str],
     valid_empty: bool,
@@ -243,8 +264,9 @@ def _prompt_loop(
     valid_k: bool = False,
     valid_y: bool = False,
 ) -> str:
+    _print_form(title, rows)
     while True:
-        raw = input_fn(prompt)
+        raw = input_fn(f"{_BOX_INDENT}> ")
         s = raw.strip()
         if valid_empty and s == "":
             return ""
@@ -271,7 +293,7 @@ def _print_selection_summary(
     ``reconsidered_rows``: (sender email or key for display, Subject) — re-check picks are not numbered.
     """
     print()
-    print("Selected for unsubscribe:")
+    _print_box("Selected for unsubscribe:")
     if new_rows:
         nums = ", ".join(f"#{n}" for n in sorted({t[0] for t in new_rows}))
         print(f"  New: {nums}")
@@ -301,7 +323,7 @@ def run_check(
     unsub_data = load_unsubscribed_list(unsub_path)
 
     if keep_data:
-        print("Previously kept (will not be asked):")
+        _print_box("Previously kept (will not be asked):")
         for idx, sk in enumerate(sorted(keep_data.keys()), start=1):
             meta = keep_data[sk]
             subj = meta.get("subject", "")
@@ -310,7 +332,7 @@ def run_check(
         print()
 
     if unsub_data:
-        print("Previously unsubscribed (will not be asked):")
+        _print_box("Previously unsubscribed (will not be asked):")
         for idx, sk in enumerate(sorted(unsub_data.keys()), start=1):
             meta = unsub_data[sk]
             subj = meta.get("subject", "")
@@ -320,7 +342,7 @@ def run_check(
 
     try:
         print("Fetching inbox from Gmail…", flush=True)
-        messages = facade.list_messages(query, max_results=50)
+        messages = facade.list_messages(query, max_results=_MAX_SCAN_MESSAGES)
     except KeyboardInterrupt:
         print("\nInterrupted.")
         return 130
@@ -359,6 +381,8 @@ def run_check(
             # only if it catches up to a message still loading.
             body_pool, body_futures = _start_body_prefetch(facade, candidates)
             try:
+                _print_box(f"New newsletters (last {days} days):")
+                print()
                 for num, m in numbered:
                     summary = substantive_list_summary(m.snippet or "", "")
                     if not summary:
@@ -381,8 +405,8 @@ def run_check(
                     print()
                     while True:
                         action = _prompt_loop(
-                            "  [Enter] keep  [u] unsubscribe  [q] quit walkthrough\n"
-                            "  > ",
+                            f"#{num}",
+                            ["[Enter] keep   [u] unsubscribe   [q] quit walkthrough"],
                             input_fn=input_fn,
                             valid_empty=True,
                             valid_u=True,
@@ -438,8 +462,8 @@ def run_check(
             print()
 
             gate = _prompt_loop(
-                "  [y] Review each one above  [Enter] or [k] Skip (keep all, no changes)\n"
-                "  > ",
+                "Kept newsletters",
+                ["[y] review each   [Enter] or [k] skip (keep all, no changes)"],
                 input_fn=input_fn,
                 valid_empty=True,
                 valid_u=False,
@@ -462,8 +486,8 @@ def run_check(
                     print(f"  Kept on: {dk}")
                     print()
                     action = _prompt_loop(
-                        "  [Enter] keep (no change)  [u] unsubscribe  [q] skip remaining\n"
-                        "  > ",
+                        f"#{idx} Previously kept",
+                        ["[Enter] keep (no change)   [u] unsubscribe   [q] skip remaining"],
                         input_fn=input_fn,
                         valid_empty=True,
                         valid_u=True,
@@ -493,11 +517,12 @@ def run_check(
         _print_selection_summary(new_unsub_rows, reconsidered_selected)
 
         if selected_for_unsub and not skip_automation:
+            _print_form(
+                f"Unsubscribe all {len(selected_for_unsub)} selected",
+                ["[Enter] confirm   [q] quit"],
+            )
             while True:
-                raw = input_fn(
-                    f"Press Enter to unsubscribe all {len(selected_for_unsub)} selected "
-                    "[q to quit]\n  > "
-                )
+                raw = input_fn(f"{_BOX_INDENT}> ")
                 choice = raw.strip()
                 if choice.lower() == "q":
                     return 0
@@ -529,51 +554,55 @@ def _default_token_path() -> Path:
     return Path(os.environ.get("GOOGLE_OAUTH_TOKEN", "~/.google/oauth_token.json")).expanduser()
 
 
-def main(argv: list[str] | None = None) -> int:
-    if argv is None:
-        argv = sys.argv[1:]
-    else:
-        argv = list(argv)
-    # Bare `unsubscribe` (no args) runs the primary workflow, like `unsubscribe check`.
-    if not argv:
-        argv = ["check"]
-
-    parser = argparse.ArgumentParser(prog="unsubscribe")
-    sub = parser.add_subparsers(dest="command", required=True)
-    check_p = sub.add_parser("check", help="Review recent newsletters and update the keep-list.")
-    check_p.add_argument(
+def _check_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="unsubscribe",
+        description="Review recent newsletters and update the keep-list.",
+        epilog="Use `unsubscribe reauth` to regenerate the OAuth token.",
+    )
+    parser.add_argument(
         "--days",
         type=int,
         default=3,
         help="Gmail newer_than:Nd (default: 3).",
     )
-    reauth_p = sub.add_parser("reauth", help="Regenerate expired OAuth token via browser flow.")
-    reauth_p.add_argument(
+    return parser
+
+
+def _reauth_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="unsubscribe reauth",
+        description="Regenerate expired OAuth token via browser flow.",
+    )
+    parser.add_argument(
         "--token-path",
         type=Path,
         default=_default_token_path(),
         help="Output path for the new token JSON.",
     )
-    reauth_p.add_argument(
+    parser.add_argument(
         "--client-secret-path",
         type=Path,
         default=None,
         help="Path to client_secret.json (default: ~/.google/client_secret.json).",
     )
-    reauth_p.add_argument(
+    parser.add_argument(
         "--browser",
         type=str,
         default=None,
         help="Browser to open for OAuth consent (e.g. 'brave', 'chrome').",
     )
+    return parser
 
-    args = parser.parse_args(argv)
+
+def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    else:
+        argv = list(argv)
     try:
-        if args.command == "check":
-            backend = GmailApiBackend.from_env()
-            facade = GmailFacade(backend)
-            return run_check(args.days, facade=facade)
-        if args.command == "reauth":
+        if argv[:1] == ["reauth"]:
+            args = _reauth_parser().parse_args(argv[1:])
             GmailApiBackend.regenerate_token(
                 args.token_path,
                 client_secret_path=args.client_secret_path,
@@ -581,7 +610,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"Token written to {args.token_path}")
             return 0
-        return 1
+        args = _check_parser().parse_args(argv)
+        backend = GmailApiBackend.from_env()
+        facade = GmailFacade(backend)
+        return run_check(args.days, facade=facade)
     except KeyboardInterrupt:
         return 130
 

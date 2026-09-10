@@ -1,6 +1,7 @@
 {
   "id": "msg123",
   "threadId": "thr456",
+  "snippet": "This week: summer sale and free shipping…",
   "payload": {
     "headers": [
       { "name": "Subject", "value": "Weekly digest" },
